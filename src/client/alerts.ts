@@ -11,19 +11,36 @@
 
 import type { PanelProvider, QuotaPanelState } from './controller.ts'
 import type { TFn } from './locale.ts'
+import { sameWindow, windowIdOf } from './usage-alerts.ts'
 
 /** The slice of the panel snapshot alert accounting reads. */
-export type AlertSnapshot = Pick<QuotaPanelState, 'providers' | 'loginAlerts' | 'alertPercent'>
+type AlertState = Pick<QuotaPanelState, 'providers' | 'loginAlerts' | 'alertPercent'>
+export type AlertSnapshot = AlertState & {
+  /** `p.id::item.label` → 已读时所在窗口标识（缺省视为没有已读记录）。 */
+  dismissedUsage?: Record<string, string>
+}
 
 /** Whether one platform has an outstanding sign-in alert. */
 function hasLoginAlert(id: string, snapshot: AlertSnapshot): boolean {
   return snapshot.loginAlerts.some((alert) => alert.id === id)
 }
 
-/** Items of one platform at or above the configured alert threshold. */
+/**
+ * Whether one usage item was marked read (已读) within its current window.
+ * 跨窗口自动失效：窗口重置后同一 100% 条目应该重新计数。
+ */
+export function isUsageDismissed(p: PanelProvider, item: PanelProvider['items'][number], snapshot: AlertSnapshot): boolean {
+  const map = snapshot.dismissedUsage
+  if (!map) return false
+  const rec = map[`${p.id}::${item.label}`]
+  if (rec === undefined) return false
+  return sameWindow(rec, windowIdOf(item))
+}
+
+/** Items of one platform at or above the configured alert threshold (unread only). */
 function overThresholdItems(p: PanelProvider, snapshot: AlertSnapshot) {
   if (p.status !== 'ok') return []
-  return p.items.filter((item) => item.percent !== undefined && item.percent >= snapshot.alertPercent)
+  return p.items.filter((item) => item.percent !== undefined && item.percent >= snapshot.alertPercent && !isUsageDismissed(p, item, snapshot))
 }
 
 /**

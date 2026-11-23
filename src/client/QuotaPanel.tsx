@@ -458,7 +458,15 @@ export function QuotaPanel(props: QuotaPanelProps) {
           <div className="dq-panel-head">
             <span className="dq-panel-title">{t('panel.title')}</span>
             {alerts > 0 && (
-              <span className="dq-panel-alert" title={alertTexts.join('\n')}>{t('panel.alerts', { n: alerts })}</span>
+              <button
+                type="button"
+                className="dq-panel-alert"
+                style={{ border: 0, background: 'transparent', font: 'inherit', padding: 0, cursor: 'pointer', color: 'inherit' }}
+                title={`${alertTexts.join('\n')}\n${t('panel.dismissHint')}`}
+                onClick={() => { props.dismissAllAlerts() }}
+              >
+                {t('panel.alerts', { n: alerts })}
+              </button>
             )}
             <button type="button" className="dq-btn dq-btn--ghost" title={mode === 'pill' ? t('mode.toRing') : t('mode.toPill')} onClick={toggleMode}>
               {mode === 'pill' ? '◯' : '▬'}

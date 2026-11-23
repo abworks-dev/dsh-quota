@@ -41,7 +41,9 @@ export function providerRowOf(
   const byRef = ref ? providers.find((p) => p.keyRef === ref) : undefined
   if (byRef) return byRef
   if (!platformId) return undefined
-  return providers.find((p) => p.id === platformId || p.id.startsWith(`${platformId}#`))
+  // 行 id 可能带账号后缀：多账号 provider 的行是 `<platform>/<账号>`，
+  // 只认 `#` 的话正在使用的账号永远置不了顶。
+  return providers.find((p) => p.id === platformId || p.id.startsWith(`${platformId}#`) || p.id.startsWith(`${platformId}/`))
 }
 
 /**

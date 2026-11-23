@@ -76,7 +76,7 @@ export const ETA_RECOVER_MINUTES = 60
 export const WINDOW_SAME_MS = 5 * 60 * 1000
 
 /** 窗口标识：条目的 resetAt（同一窗口内不变、跨窗口必变），缺省 'static'。 */
-function windowIdOf(item: { resetAt?: string }): string {
+export function windowIdOf(item: { resetAt?: string }): string {
   return item.resetAt ?? 'static'
 }
 

@@ -138,7 +138,11 @@ export function windowLabel(name: string | undefined): string {
   // 网关也可能给中文窗口名（"3 天" / "5 小时"）。
   const cn = /^(\d+)\s*(天|小时)/.exec(raw)
   if (cn) return `${cn[1]} ${cn[2]}窗口`
-  if (/credit/.test(n)) return '额度'
+  // 同一张卡上可能同时有「本期 / 额外 / 总额」三种 credit 窗口，必须分开，
+  // 否则条目同名、按 label 派生的告警 key 也相撞（见 usage-alerts.ts）。
+  if (/extra\s*credit/.test(n)) return '额外额度'
+  if (/total\s*credit/.test(n)) return '总额度'
+  if (/credit/.test(n)) return '本期额度'
   return raw
 }
 
@@ -183,9 +187,20 @@ export function cardItems(card: MagpieCard): QuotaItem[] {
   return items
 }
 
+/** 账号 → URL 安全的行 id 后缀（与 magpie.ts 的 rowId 同一套 slug 规则）。 */
+function accountSlug(user: string): string {
+  return user.trim().toLowerCase().replace(/[^a-z0-9@._-]+/g, '-').replace(/^-+|-+$/g, '')
+}
+
 /**
- * 把一张线路的卡片列表聚合成面板行：按 `provider` 合并（同一 provider 的
- * plan 卡 + 余额卡合成一张卡片），provider 首次出现的顺序即行顺序。
+ * 把一张线路的卡片列表聚合成面板行：先按 `provider` 聚合，再按卡片上的
+ * `user`（账号）拆行——同一 provider 的多账号共用一套凭证，不拆开的话行 id、
+ * 行名与条目名全都相同，用户分不清哪张卡是谁的。
+ *
+ * 拆行条件：该 provider 下有 **多于一个**不同的 user。只有一个账号（或卡片
+ * 根本没带 user）时保持旧行为：单行、id 无账号后缀、label 不变——否则
+ * `magpie-connector-codex` 这类既有行 id 会漂移，历史与告警 key 全部失效。
+ * 没有 user 的卡片并入第一个账号行（通常是余额/汇总卡）。
  * @param cards - 网关返回的原始卡片。
  * @param lineId - 线路 id（多线路同 provider 时用于区分行 id）。
  * @param multiLine - 是否有多条线路同时在用（true 时行 id 追加 `#线路 id`）。
@@ -199,28 +214,46 @@ export function rowsFromCards(
   keyRef: string,
   keySource: string,
 ): ProviderSnapshot[] {
-  const groups = new Map<string, { label: string; items: QuotaItem[]; message?: string }>()
+  const byProvider = new Map<string, MagpieCard[]>()
   for (const card of cards) {
     const provider = (card.provider ?? '').trim().toLowerCase()
     if (!provider) continue
-    const group = groups.get(provider) ?? { label: cardLabel(card, provider), items: [] }
-    group.items.push(...cardItems(card))
-    const error = card.error?.trim()
-    if (error && !group.message) group.message = error
-    groups.set(provider, group)
+    const list = byProvider.get(provider)
+    if (list) list.push(card)
+    else byProvider.set(provider, [card])
   }
   const rows: ProviderSnapshot[] = []
-  for (const [provider, group] of groups) {
-    rows.push({
-      id: `${CONNECTOR_PLATFORM_PREFIX}${provider}${multiLine ? `#${lineId}` : ''}`,
-      label: group.label,
-      status: group.message ? 'error' : 'ok',
-      ...(group.message === undefined ? {} : { message: group.message }),
-      via: 'api',
-      keyRef,
-      keySource,
-      items: group.items,
-    })
+  for (const [provider, pCards] of byProvider) {
+    // 账号按 trim 后的值去重（网关偶尔带尾空格）；空 user 视为「无账号」。
+    const users = [...new Set(pCards.map((c) => str(c.user)?.trim()).filter((u): u is string => Boolean(u)))]
+    const groups = users.length > 1
+      ? users.map((user) => ({ user, cards: pCards.filter((c) => str(c.user)?.trim() === user) }))
+      : [{ user: undefined, cards: pCards }]
+    if (users.length > 1) {
+      const noUser = pCards.filter((c) => !str(c.user)?.trim())
+      if (noUser.length > 0) groups[0].cards = groups[0].cards.concat(noUser)
+    }
+    for (const group of groups) {
+      const items: QuotaItem[] = []
+      let message: string | undefined
+      for (const card of group.cards) {
+        items.push(...cardItems(card))
+        const error = card.error?.trim()
+        if (error && !message) message = error
+      }
+      const slug = group.user === undefined ? '' : accountSlug(group.user)
+      const baseLabel = cardLabel(group.cards[0]!, provider)
+      rows.push({
+        id: `${CONNECTOR_PLATFORM_PREFIX}${provider}${slug ? `/${slug}` : ''}${multiLine ? `#${lineId}` : ''}`,
+        label: group.user === undefined ? baseLabel : `${baseLabel} · ${group.user}`,
+        status: message ? 'error' : 'ok',
+        ...(message === undefined ? {} : { message }),
+        via: 'api',
+        keyRef,
+        keySource,
+        items,
+      })
+    }
   }
   return rows
 }
