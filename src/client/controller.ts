@@ -8,7 +8,7 @@
 import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { browserLang, translate, type Lang } from './locale.ts'
 import { trendValues } from './sparkline.ts'
-import { createUsageAlertState, deserializeUsageAlertState, evaluateUsageAlerts, serializeUsageAlertState, type UsageAlert, type UsageAlertState } from './usage-alerts.ts'
+import { createUsageAlertState, deserializeUsageAlertState, evaluateUsageAlerts, sameWindow, serializeUsageAlertState, windowIdOf, type UsageAlert, type UsageAlertState } from './usage-alerts.ts'
 
 /** One item row as rendered by the panel. */
 export interface PanelItem {
@@ -163,6 +163,8 @@ export interface QuotaPanelState {
   loginAlerts: Array<{ id: string; label: string }>
   /** 用量告警（悬浮球 toast：越阈值跨越 + 预计耗尽，见 usage-alerts.ts）。 */
   usageAlerts: UsageAlert[]
+  /** 用量告警「已读」记录：`p.id::item.label` → 窗口标识（跨窗口自动失效）。 */
+  dismissedUsage: Record<string, string>
   /** 用量占比告警阈值（host 下发，默认 85）。 */
   alertPercent: number
   /** 正在测活的平台 id。 */
@@ -200,6 +202,8 @@ export interface QuotaPanelFace {
   dismissLogin(platform: string): void
   /** Dismiss one usage toast until its percent climbs ≥5 points or the window resets. */
   dismissUsageAlert(key: string): void
+  /** Mark every current over-threshold usage item as read (header badge clears, no toast re-fires). */
+  dismissAllAlerts(): void
   /** Run a one-shot connectivity probe for one platform card. */
   probe(platform: string): void
 }
@@ -229,6 +233,7 @@ const INITIAL: QuotaPanelState = {
   providerKeyRefs: {},
   loginAlerts: [],
   usageAlerts: [],
+  dismissedUsage: {},
   trends: {},
   alertPercent: 85,
   probing: '',
@@ -250,6 +255,8 @@ export class QuotaPanelController {
   private modelDirs: ModelDirectoriesLike | undefined
   /** 已忽略提醒的平台（恢复后再次失败会重新提醒）。 */
   private readonly dismissedAlerts = new Set<string>()
+  /** 用量告警「已读」记录：`p.id::item.label` → 窗口标识（跨窗口自动失效）。 */
+  private readonly dismissedUsage = new Map<string, string>()
   /** 用量提醒状态机（每窗口一次的规则 + 持久化，见 usage-alerts.ts）。 */
   private usageState: UsageAlertState = loadUsageAlertState()
   private unwatchModel: (() => void) | undefined
@@ -358,6 +365,7 @@ export class QuotaPanelController {
       loginRetry: (platform) => { void this.loginRetry(platform) },
       dismissLogin: (platform) => { this.dismissLogin(platform) },
       dismissUsageAlert: (key) => { this.dismissUsageAlert(key) },
+      dismissAllAlerts: () => { this.dismissAllUsageAlerts() },
       probe: (platform) => { void this.probe(platform) },
     }
   }
@@ -432,13 +440,43 @@ export class QuotaPanelController {
       if (a.kind === 'eta' && (item.etaMinutes === undefined || item.etaMinutes > 60)) active.delete(id)
       if ((a.at ?? 0) !== 0 && now - (a.at ?? now) > ALERT_VISIBLE_MS) active.delete(id) // 自动收起
     }
-    this.patch({ usageAlerts: [...active.values()] })
+    const currentWin = new Map<string, string>()
+    for (const p of providers) {
+      if (p.status !== 'ok') continue
+      for (const item of p.items) currentWin.set(`${p.id}::${item.label}`, windowIdOf(item))
+    }
+    // 窗口重置后「已读」不再有效，否则下一轮的新窗口会静默丢掉告警。
+    for (const [key, win] of [...this.dismissedUsage]) {
+      const cw = currentWin.get(key)
+      if (cw === undefined || !sameWindow(win, cw)) this.dismissedUsage.delete(key)
+    }
+    this.patch({ usageAlerts: [...active.values()], dismissedUsage: Object.fromEntries(this.dismissedUsage) })
   }
 
   /** Dismiss one usage toast: the window stays marked shown, so it cannot re-fire. */
   private dismissUsageAlert(key: string): void {
     const snap = this.store.getSnapshot()
     this.patch({ usageAlerts: snap.usageAlerts.filter((a) => a.key !== key) })
+  }
+
+  /**
+   * 把所有当前超过阈值的用量条目标为已读：面板标题栏角标清零，
+   * 同窗口内不再弹 toast（shown 与已读记录一起写，并持久化到 usage state）。
+   */
+  private dismissAllUsageAlerts(): void {
+    const snap = this.store.getSnapshot()
+    for (const p of snap.providers) {
+      if (p.status !== 'ok') continue
+      for (const item of p.items) {
+        if (item.percent !== undefined && item.percent >= snap.alertPercent) {
+          const key = `${p.id}::${item.label}`
+          this.dismissedUsage.set(key, windowIdOf(item))
+          this.usageState.shown.set(key, windowIdOf(item))
+        }
+      }
+    }
+    saveUsageAlertState(this.usageState)
+    this.patch({ usageAlerts: [], dismissedUsage: Object.fromEntries(this.dismissedUsage) })
   }
 
   /** One-shot connectivity probe: latency on success, upstream error on failure. */

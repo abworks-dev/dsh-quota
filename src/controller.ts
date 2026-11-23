@@ -196,7 +196,9 @@ function shortTag(label: string): string {
  */
 function mergeConnectorRows(providers: ProviderSnapshot[], connectorRows: ProviderSnapshot[]): void {
   if (connectorRows.length === 0) return
-  const covered = new Set(connectorRows.map((row) => row.id.replace(CONNECTOR_PLATFORM_PREFIX, '').replace(/#.*$/, '')))
+  // 行 id 可能带账号后缀（多账号 provider：`magpie-connector-codex/a@b.com`）
+  // 和多线路后缀（`#<lineId>`），两者都要剥掉才能对上本地平台行。
+  const covered = new Set(connectorRows.map((row) => row.id.replace(CONNECTOR_PLATFORM_PREFIX, '').replace(/[/#].*$/, '')))
   for (let i = providers.length - 1; i >= 0; i -= 1) {
     const id = providers[i]?.id
     if (id !== undefined && covered.has(id)) providers.splice(i, 1)
@@ -666,7 +668,7 @@ export class QuotaController implements QuotaControllerFace {
         const magpieRow = platform === MAGPIE_PLATFORM_ID ? magpieRowForModel(magpieRowsForModel, dm.model) : undefined
         const row = magpieRow
           ?? (ref ? providers.find((p) => p.keyRef === ref) : undefined)
-          ?? (platform ? providers.find((p) => p.id === platform || p.id.startsWith(`${platform}#`)) : undefined)
+          ?? (platform ? providers.find((p) => p.id === platform || p.id.startsWith(`${platform}#`) || p.id.startsWith(`${platform}/`)) : undefined)
         currentModel = { provider: dm.provider, model: dm.model, platform: row?.id ?? platform, summary: row ? summarize(row) : '' }
       }
 
@@ -675,7 +677,7 @@ export class QuotaController implements QuotaControllerFace {
       const matchedRow = (lp: LlmProviderInfo): boolean => {
         if (lp.keyRef && providers.some((p) => p.keyRef === lp.keyRef)) return true
         const platform = platformForProvider(lp.id)
-        return Boolean(platform) && providers.some((p) => p.id === platform || p.id.startsWith(`${platform}#`))
+        return Boolean(platform) && providers.some((p) => p.id === platform || p.id.startsWith(`${platform}#`) || p.id.startsWith(`${platform}/`))
       }
       for (const lp of llmProviders) {
         if (!lp.keyRef || !lp.baseURL || matchedRow(lp)) continue

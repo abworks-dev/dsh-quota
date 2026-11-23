@@ -91,7 +91,13 @@ test('windowLabel maps the gateway window names onto the panel vocabulary', () =
   assert.equal(windowLabel('5 hours'), '5 小时窗口')
   assert.equal(windowLabel('7 days'), '周额度')
   assert.equal(windowLabel('Weekly'), '周额度')
-  assert.equal(windowLabel('Credits'), '额度')
+  assert.equal(windowLabel('Credits'), '本期额度')
+  assert.equal(windowLabel('Extra credits'), '额外额度')
+  assert.equal(windowLabel('Total credits'), '总额度')
+  assert.equal(windowLabel('Extra Credits'), '额外额度')
+  assert.equal(windowLabel('TOTAL CREDIT'), '总额度')
+  // 三种 credit 窗口必须互不相同：同名会让条目分不清，也会让告警 key 相撞。
+  assert.equal(new Set(['Credits', 'Extra credits', 'Total credits'].map((name) => windowLabel(name))).size, 3)
   assert.equal(windowLabel('Monthly'), '月额度')
   assert.equal(windowLabel('3 天'), '3 天窗口')
   assert.equal(windowLabel(undefined), '额度')
@@ -120,7 +126,7 @@ test('cardItems turns every window into a percent row and adds a balance row', (
   assert.deepEqual(items, [
     { label: '5 小时窗口', percent: 0.1, resetAt: '2026-11-10T21:47:35.461Z' },
     { label: '周额度', percent: 55.34, resetAt: '2026-11-12T11:10:03.231Z' },
-    { label: '额度', percent: 34.82, resetAt: '2026-11-22T06:47:57Z', display: '24.37 / 70.00 credits' },
+    { label: '本期额度', percent: 34.82, resetAt: '2026-11-22T06:47:57Z', display: '24.37 / 70.00 credits' },
     { label: '余额', display: '$45.63', remaining: 45.63 },
   ])
 })
@@ -183,6 +189,61 @@ test('rowsFromCards lowercases the provider so ids stay stable', () => {
 
 test('rowsFromCards skips cards without a provider', () => {
   assert.deepEqual(rowsFromCards([{ name: 'no owner' }], 'aa', false, 'ref', 'env'), [])
+})
+
+test('rowsFromCards splits one provider into one row per account when several users share it', () => {
+  const rows = rowsFromCards([
+    { provider: 'codex', name: 'Codex', user: 'alice@example.com', windows: [{ name: 'Credits', used: 100 }] },
+    { provider: 'codex', name: 'Codex', user: 'Bob', windows: [{ name: 'Extra credits', used: 20 }] },
+    { provider: 'codex', name: 'Codex', user: 'carol', windows: [{ name: 'Total credits', used: 45 }] },
+  ], 'line1', true, 'MAGPIE_LINE_LINE1_API_KEY', 'env')
+  assert.deepEqual(rows.map((r) => r.id), [
+    'magpie-connector-codex/alice@example.com#line1',
+    'magpie-connector-codex/bob#line1',
+    'magpie-connector-codex/carol#line1',
+  ])
+  assert.deepEqual(rows.map((r) => r.label), [
+    'Codex · alice@example.com',
+    'Codex · Bob',
+    'Codex · carol',
+  ])
+  // 行名必须可分：旧行为是三个账号全叫「Codex」挤在一行。
+  assert.equal(new Set(rows.map((r) => r.label)).size, 3)
+  // 同一行内条目名也不能重复（旧实现把三种 credit 窗口都叫「额度」）。
+  for (const row of rows) {
+    assert.equal(new Set(row.items.map((i) => i.label)).size, row.items.length)
+  }
+  assert.deepEqual(rows.map((r) => r.items[0]?.label), ['本期额度', '额外额度', '总额度'])
+})
+
+test('rowsFromCards keeps the single-account shape (no account suffix) — regression', () => {
+  const rows = rowsFromCards([
+    { provider: 'codex', name: 'Codex', user: 'alice@example.com', windows: [{ name: '7 days', used: 100 }] },
+  ], 'line1', false, 'MAGPIE_LINE_LINE1_API_KEY', 'env')
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0]?.id, 'magpie-connector-codex')
+  assert.ok(rows[0]?.label.startsWith('Codex'))
+  assert.equal(rows[0]?.label, 'Codex')
+})
+
+test('rowsFromCards dedupes accounts by trimmed user (whitespace is not a second account)', () => {
+  const rows = rowsFromCards([
+    { provider: 'codex', name: 'Codex', user: ' alice ' },
+    { provider: 'codex', name: 'Codex', user: 'alice' },
+  ], 'aa', false, 'ref', 'env')
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0]?.id, 'magpie-connector-codex')
+})
+
+test('rowsFromCards folds cards without a user into the first account row', () => {
+  const rows = rowsFromCards([
+    { provider: 'codex', name: 'Codex', user: 'alice', windows: [{ name: 'Weekly', used: 12 }] },
+    { provider: 'codex', name: 'Codex', user: 'bob', windows: [{ name: 'Weekly', used: 80 }] },
+    { provider: 'codex', name: 'Codex', balance: '$45.63' },
+  ], 'aa', false, 'ref', 'env')
+  assert.equal(rows.length, 2)
+  assert.deepEqual(rows[0]?.items.map((i) => i.label), ['周额度', '余额'])
+  assert.deepEqual(rows[1]?.items.map((i) => i.label), ['周额度'])
 })
 
 // ── 响应体容错 ──────────────────────────────────────────────────────────────
